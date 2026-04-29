@@ -20,7 +20,7 @@ The dataset is naturally `(C=11, T, H, W)`; per-frame encoding (a single 2D ViT 
 
 ## Approach (recommended, anchored in `le-wm`)
 
-**Pretraining objective.** Per-frame 2D ViT encodes each of `T` frames into a sequence of frame embeddings `(B, T, D)`. An autoregressive transformer predictor consumes the history and predicts future-frame embeddings. Loss = MSE between predicted future embeddings and the encoder's own future embeddings (detached) + SIGReg anti-collapse regularizer on the full embedding sequence. Optionally use **EB-JEPA-style parallel multistep unroll** (`eb_jepa/jepa.py:142-157`) so the predictor sees its own outputs during training (exposure-bias mitigation).
+**Pretraining objective.** Per-frame 2D ViT encodes each of `T` frames into a sequence of frame embeddings `(B, T, D)`. An autoregressive transformer predictor consumes the history and predicts future-frame embeddings. Loss = MSE between predicted future embeddings and the encoder's own future embeddings (detached) + SIGReg anti-collapse regularizer on the full embedding sequence. Optionally use **EB-JEPA-style parallel multistep unroll** (`eb_jepa/eb_jepa/jepa.py:142-157`) so the predictor sees its own outputs during training (exposure-bias mitigation).
 
 **Inputs.** `(C=11, T=8, H=256, W=256)` per sample. Treat the time axis as the sequence axis: `T=8` frame embeddings per video.
 
@@ -51,7 +51,7 @@ If we want to ablate conditioning, also expose a `predictor_no_cond=True` flag t
 
 **No EMA target encoder.** Both references omit it; we follow.
 
-**Multistep unroll (optional, EB-JEPA-style).** Switch on with `nsteps=4`. From `eb_jepa/jepa.py:142-157`:
+**Multistep unroll (optional, EB-JEPA-style).** Switch on with `nsteps=4`. From `eb_jepa/eb_jepa/jepa.py:142-157`:
 
 ```python
 if unroll_mode == "parallel":
@@ -97,7 +97,7 @@ stable-pretraining-physics/
 
 ### 1. `physics_ssl/data.py` — `ActiveMatterVideoDataset`
 
-Adapted from `WellDatasetForJEPA` (`remy9926/physical-representation-learning/physics_jepa/data.py:17-241`). Reuse — by copy — the HDF5 shard discovery + `t0_fields`/`t1_fields`/`t2_fields` parsing (lines 117-150) and `alpha`/`zeta` extraction (line 113). Output:
+Adapted from `WellDatasetForJEPA` (`remy9926/physical-representation-learning/physics_jepa/data.py:18-333`). Reuse — by copy — the HDF5 shard discovery (lines 103-134), `t0_fields`/`t1_fields`/`t2_fields` schema parsing (lines 136-171), and `alpha`/`zeta` extraction (lines 130-132). Output:
 
 ```python
 def __getitem__(self, idx):
@@ -116,7 +116,7 @@ Path: `${THE_WELL_DATA_DIR}/active_matter/data/{train,valid}/`. No spatial flips
 
 ### 2. `physics_ssl/transforms.py`
 
-`ChannelZScore(mean, std)` (`(11,)`-shaped stats from a one-time `.npz` cache) and `AddGaussianNoise(std)` (mirrors `physics_jepa/data.py:233-278`). `python -m physics_ssl.data --compute-stats --split train` writes the cache.
+`ChannelZScore(mean, std)` (`(11,)`-shaped stats from a one-time `.npz` cache) and `AddGaussianNoise(std)` (mirrors `physics_jepa/data.py:269-274`). `python -m physics_ssl.data --compute-stats --split train` writes the cache.
 
 ### 3. `physics_ssl/model.py` — `ARPredictor`, `SIGReg`, `MLP`, `Embedder`
 
@@ -187,7 +187,7 @@ def tjepa_forward(self, batch, stage, cfg):
     }
 ```
 
-A `multistep=True` flag wraps the prediction in EB-JEPA's parallel-unroll loop (`eb_jepa/jepa.py:142-157`); off by default.
+A `multistep=True` flag wraps the prediction in EB-JEPA's parallel-unroll loop (`eb_jepa/eb_jepa/jepa.py:142-157`); off by default.
 
 ### 6. `physics_ssl/callbacks.py` — `RegressionProbe`
 
@@ -284,7 +284,7 @@ The structure parrots `le-wm/config/train/lewm.yaml` (LR `5e-5`, wd `1e-3`, grad
 
 | What to reuse | Where it lives |
 |---|---|
-| HDF5 discovery, `t0/t1/t2_fields` parsing, `alpha`/`zeta` extraction, GPU noise pattern | `remy9926/physical-representation-learning/physics_jepa/data.py:101-278` |
+| HDF5 discovery (`_build_index`), `t0/t1/t2_fields` schema parsing (`_build_global_field_schema`), `alpha`/`zeta` extraction, GPU noise pattern | `remy9926/physical-representation-learning/physics_jepa/data.py:103-134, 136-171, 130-132, 269-274` |
 | **`ARPredictor`** (depth 6, dim 192, AdaLN-zero conditioning, learnable temporal pos-embed) | `le-wm/module.py:244-286` |
 | **`ConditionalBlock`** with AdaLN-zero modulation | `le-wm/module.py:88-111` |
 | **`Embedder`** for conditioning vector (`Conv1d` smoothing + MLP) | `le-wm/module.py:189-214` |
@@ -292,7 +292,7 @@ The structure parrots `le-wm/config/train/lewm.yaml` (LR `5e-5`, wd `1e-3`, grad
 | **`lejepa_forward`** (template for `tjepa_forward`) | `le-wm/train.py:18-46` |
 | `MLP` projector (Linear→BatchNorm1d→Linear→…) | `le-wm/train.py:104-109` |
 | Hyperparameter defaults (lr 5e-5, wd 1e-3, clip 1.0, warmup 10%) | `le-wm/config/train/lewm.yaml`, `le-wm/train.py:130` |
-| **EB-JEPA parallel multistep unroll** (optional `nsteps>1`) | `eb_jepa/jepa.py:142-157` |
+| **EB-JEPA parallel multistep unroll** (optional `nsteps>1`) | `eb_jepa/eb_jepa/jepa.py:142-157` |
 | **EB-JEPA `CosineWithWarmup`** (alternative scheduler) | `eb_jepa/schedulers.py:4-38` |
 | **EB-JEPA separate enc/predictor grad clipping** (optional, if instability) | `eb_jepa/examples/ac_video_jepa/main.py:334-341` |
 | `vit_hf` 2D ViT loader | `stable-pretraining/stable_pretraining/backbone/utils.py` |

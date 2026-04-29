@@ -71,7 +71,7 @@ stable-pretraining-physics/
 
 ### 1. `physics_ssl/data.py` — `ActiveMatterVolumeDataset`
 
-Adapt `WellDatasetForJEPA` (`remy9926/physical-representation-learning/physics_jepa/data.py:17-241`) but emit a **single volume**, not a view pair:
+Adapt `WellDatasetForJEPA` (`remy9926/physical-representation-learning/physics_jepa/data.py:18-333`) but emit a **single volume**, not a view pair:
 
 ```python
 def __getitem__(self, idx):
@@ -85,11 +85,11 @@ def __getitem__(self, idx):
     }
 ```
 
-Reuse — by copy, not by import — the HDF5 shard discovery + field stacking from `physics_jepa/data.py:101-150` (`t0_fields`/`t1_fields`/`t2_fields`) and `alpha`/`zeta` extraction at line 113. Path: `${THE_WELL_DATA_DIR}/active_matter/data/{train,valid}/`. No spatial flips/rotations.
+Reuse — by copy, not by import — the HDF5 shard discovery (`physics_jepa/data.py:103-134`), field-stacking schema (`136-171`), and `alpha`/`zeta` extraction (`130-132`). Path: `${THE_WELL_DATA_DIR}/active_matter/data/{train,valid}/`. No spatial flips/rotations.
 
 ### 2. `physics_ssl/transforms.py`
 
-`ChannelZScore(mean, std)` (`(11,)`-shaped stats loaded from a one-time `.npz` cache) and `AddGaussianNoise(std)` mirroring the GPU noise step at `physics_jepa/data.py:233-278`. A `--compute-stats` CLI on `data.py` walks the train split once and writes the cache.
+`ChannelZScore(mean, std)` (`(11,)`-shaped stats loaded from a one-time `.npz` cache) and `AddGaussianNoise(std)` mirroring the GPU noise step at `physics_jepa/data.py:269-274`. A `--compute-stats` CLI on `data.py` walks the train split once and writes the cache.
 
 ### 3. `physics_ssl/masking.py` — `multi_block_mask_3d`
 
@@ -272,10 +272,10 @@ trainer:
 
 | What to reuse | Where it lives |
 |---|---|
-| HDF5 shard discovery, field stacking, frame sampling | `remy9926/physical-representation-learning/physics_jepa/data.py:101-231` |
+| HDF5 shard discovery (`_build_index`), field-stacking schema (`_build_global_field_schema`), frame sampling | `remy9926/physical-representation-learning/physics_jepa/data.py:103-134, 136-171, 194-280` |
 | `t0_fields`/`t1_fields`/`t2_fields` parsing | same file, lines 117-150 |
-| `alpha`/`zeta` extraction | `physics_jepa/data.py:113`, `finetuner.py` regression targets |
-| Channel normalization + GPU noise pattern | `physics_jepa/data.py:233-278` |
+| `alpha`/`zeta` extraction | `physics_jepa/data.py:130-132`, `finetuner.py` regression targets |
+| Channel normalization + GPU noise pattern | `physics_jepa/data.py:269-274` |
 | `MaskedEncoder` (timm-ViT-aware token masking) | `stable-pretraining/stable_pretraining/backbone/vit.py:229-468` |
 | `FlexibleTransformer` (predictor with `add_mask_token=True`, `sincos_3d`) | `stable-pretraining/stable_pretraining/backbone/vit.py:1129-1671`, IJEPA config at 1182-1193 |
 | `TeacherStudentWrapper` + `TeacherStudentCallback` (EMA target encoder) | `backbone/utils.py:336-493`, `callbacks/teacher_student.py:11-143` |
