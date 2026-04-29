@@ -1,26 +1,38 @@
 """Active Matter (The Well) dataset adapted for temporal-AR JEPA.
 
-Adapted from `remy9926/physical-representation-learning/physics_jepa/data.py`
-(`WellDatasetForJEPA`, lines 17-241). The structural changes:
+Adapted from ``remy9926/physical-representation-learning/physics_jepa/data.py``
+(``WellDatasetForJEPA``, lines 18-333). The structural changes:
 
-* Returns a single contiguous video volume `(C=11, T, H, W)` per sample, not a
-  context/target pair, since the temporal-AR JEPA forward operates on the whole
-  sequence and slices its own history/target windows internally.
-* Surfaces continuous physical params `alpha`, `zeta` (named explicitly via the
-  HDF5 `scalars` group) plus a 16-bin discretized `label` so the classification
-  probes (`OnlineKNN`, `OnlineProbe`) have a target.
-* Provides a `--compute-stats` CLI that walks the train split once and writes
-  per-channel mean/std to a `.npz` file used by `ChannelZScore`.
+* Returns a single contiguous video volume ``(C=11, T, H, W)`` per sample, not
+  a context/target pair, since the temporal-AR JEPA forward operates on the
+  whole sequence and slices its own history/target windows internally.
+* Surfaces continuous physical params ``alpha``, ``zeta`` (named explicitly
+  via the HDF5 ``scalars`` group) plus a discretized ``label`` so the
+  classification probes (``OnlineKNN``, ``OnlineProbe``) have a target.
+* Provides a ``--compute-stats`` CLI that walks the train split once and
+  writes per-channel mean/std to a ``.npz`` file used by ``ChannelZScore``.
+
+Reused logic copied (not imported) from ``physics_jepa/data.py``:
+
+* HDF5 shard discovery: ``_build_index`` (lines 103-134).
+* Field schema parsing for ``t0/t1/t2_fields``: ``_build_global_field_schema``
+  (lines 136-171).
+* ``alpha``/``zeta`` scalar extraction pattern: lines 130-132.
+* Optional Gaussian noise injection step: lines 269-274 (factored into
+  ``physics_ssl/transforms.py:AddGaussianNoise`` here).
 
 Active Matter conventions (from remy9926):
-* HDF5 layout: `t0_fields/{name}`, `t1_fields/{name}`, `t2_fields/{name}` plus
-  `scalars/{alpha,zeta,L}`. `L` is constant across the dataset and is ignored.
+
+* HDF5 layout: ``t0_fields/{name}``, ``t1_fields/{name}``, ``t2_fields/{name}``
+  plus ``scalars/{alpha,zeta,L}``. ``L`` is constant across the dataset and
+  is ignored.
 * Total channels = 11 (after flattening the per-field component dims).
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import weakref
 from collections import OrderedDict
@@ -31,6 +43,8 @@ import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+logger = logging.getLogger(__name__)
 
 
 # 4x4 grid of (alpha, zeta) -> 16 bins for classification probes. The exact
@@ -86,6 +100,13 @@ class ActiveMatterVideoDataset(Dataset):
         self.transform = transform
         self.bins_per_param = int(bins_per_param)
 
+        if self.bins_per_param < 2:
+            raise ValueError(
+                f"bins_per_param must be >= 2 (got {bins_per_param}); "
+                "with a single bin every sample collapses to label 0 and the "
+                "classification probes are meaningless."
+            )
+
         self._open: OrderedDict[str, tuple[h5py.File, dict]] | None = None
         self._max_open_files = int(max_open_files)
         self._rdcc = (int(rdcc_nbytes), int(rdcc_nslots), float(rdcc_w0))
@@ -109,9 +130,10 @@ class ActiveMatterVideoDataset(Dataset):
     def _build_index(self):
         """Scan HDF5 shards once at construction; return (index, scalars_per_file).
 
-        index entries: (file_name, obj_idx, t0). `scalars_per_file` maps file
-        name to a dict with keys `alpha`, `zeta` (numpy arrays of length
-        `n_objs`).
+        index entries: (rel_path, obj_idx, t0) where rel_path is the shard's
+        path relative to ``self.split_dir`` (preserving any subdirectory
+        structure so two shards with the same basename do not alias). The
+        scalars dict is keyed by the same relative path.
         """
         idx = []
         scalars: dict[str, dict[str, np.ndarray]] = {}
@@ -119,17 +141,24 @@ class ActiveMatterVideoDataset(Dataset):
         paths = sorted(
             list(self.split_dir.rglob("*.h5")) + list(self.split_dir.rglob("*.hdf5"))
         )
+        skipped = 0
         for path in paths:
+            rel_path = path.relative_to(self.split_dir).as_posix()
             with h5py.File(path, "r") as f:
                 first_field = f["t0_fields"][list(f["t0_fields"].keys())[0]]
                 T = int(first_field.shape[1])
                 n_objs = int(first_field.shape[0])
                 max_t0 = T - F
                 if max_t0 < 0:
+                    skipped += 1
+                    logger.warning(
+                        "skipping shard %s: T=%d < num_frames=%d",
+                        rel_path, T, F,
+                    )
                     continue
                 for obj_id in range(n_objs):
                     for t0 in range(0, max_t0 + 1, self.stride):
-                        idx.append((path.name, obj_id, t0))
+                        idx.append((rel_path, obj_id, t0))
                 # Scalars: pull alpha and zeta by name, ignore L (constant).
                 if "scalars" in f:
                     s_group = f["scalars"]
@@ -158,12 +187,17 @@ class ActiveMatterVideoDataset(Dataset):
                                     (n_objs,),
                                 ).astype(np.float32),
                             )
-                    scalars[path.name] = file_scalars
+                    scalars[rel_path] = file_scalars
                 else:
-                    scalars[path.name] = {
+                    scalars[rel_path] = {
                         "alpha": np.zeros(n_objs, dtype=np.float32),
                         "zeta": np.zeros(n_objs, dtype=np.float32),
                     }
+        if skipped:
+            logger.warning(
+                "skipped %d shards with T < num_frames; %d windows kept",
+                skipped, len(idx),
+            )
         return idx, scalars
 
     def _build_field_schema(self, sample_path: Path):
@@ -240,15 +274,20 @@ class ActiveMatterVideoDataset(Dataset):
                 old_f.close()
             except Exception:
                 pass
-        f = h5py.File(
-            self.split_dir / file_id,
+        # Try SWMR (faster, parallel-reader-safe) first; many archived datasets
+        # are not authored in SWMR mode and will raise OSError on open. Fall
+        # back to a plain read-only handle in that case.
+        common_kwargs = dict(
             mode="r",
-            libver="latest",
-            swmr=True,
             rdcc_nbytes=self._rdcc[0],
             rdcc_nslots=self._rdcc[1],
             rdcc_w0=self._rdcc[2],
         )
+        path = self.split_dir / file_id
+        try:
+            f = h5py.File(path, libver="latest", swmr=True, **common_kwargs)
+        except (OSError, ValueError):
+            f = h5py.File(path, **common_kwargs)
         st: dict = {}
         self._open[file_id] = (f, st)
         return f, st
@@ -337,7 +376,13 @@ def compute_stats(root: str | Path, split: str, num_frames: int, output_path: st
     dataset = ActiveMatterVideoDataset(
         root=root, split=split, num_frames=num_frames, transform=None
     )
+    if len(dataset) == 0:
+        raise ValueError(f"No windows found for split={split!r} under {root}")
     n = len(dataset) if max_samples is None else min(max_samples, len(dataset))
+    if n <= 0:
+        raise ValueError(
+            f"max_samples must be positive (got {max_samples}); cannot compute stats over zero windows."
+        )
     indices = np.linspace(0, len(dataset) - 1, num=n, dtype=int)
 
     sum_, sumsq, count = None, None, 0
@@ -357,6 +402,17 @@ def compute_stats(root: str | Path, split: str, num_frames: int, output_path: st
     var = (sumsq / count).numpy().astype(np.float32) - mean ** 2
     std = np.sqrt(np.clip(var, 0, None)).astype(np.float32)
 
+    # Surface zero-variance channels: an always-constant channel is almost
+    # always a data-integrity bug (e.g. a missing field, an identically-zero
+    # tensor component) and silently rescaling it by 1/eps would mask the bug.
+    near_zero = np.where(std < 1e-6)[0]
+    if near_zero.size:
+        logger.warning(
+            "channels with near-zero variance (std < 1e-6) — likely a constant "
+            "or missing field; ChannelZScore will floor std at eps for these: %s",
+            near_zero.tolist(),
+        )
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(output_path, mean=mean, std=std)
@@ -367,7 +423,7 @@ def _main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--compute-stats", action="store_true", required=True)
     parser.add_argument("--split", default="train")
-    parser.add_argument("--num-frames", type=int, default=8)
+    parser.add_argument("--num-frames", type=int, default=4)
     parser.add_argument("--root", default=None,
                         help="Defaults to $THE_WELL_DATA_DIR/active_matter/data")
     parser.add_argument("--out", default="cache/active_matter_stats.npz")
