@@ -1,10 +1,12 @@
 """Predictor / regularizer modules.
 
 Copied verbatim from `le-wm/module.py` with two adaptations:
-    * `Embedder` is the original LeWM action embedder; we feed `[alpha, zeta]`
-      (input_dim=2) for parameter-conditional dynamics on Active Matter.
-    * `ARPredictor.forward` short-circuits AdaLN modulation when `c is None`,
-      giving a clean unconditional ablation (`predictor_no_cond=True`).
+    * `Embedder` is the LeWM low-dim conditioning encoder, repurposed here for
+      `[alpha, zeta]` (input_dim=2) instead of a per-step action stream.
+    * `ARPredictor.__init__` accepts `unconditional=True`, swapping
+      `ConditionalBlock` for the vanilla self-attention `Block` so AdaLN-zero
+      modulation is removed entirely. The toggle is set at construction time;
+      `ARPredictor.forward` then ignores the `c` argument when unconditional.
 """
 
 import torch

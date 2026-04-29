@@ -17,7 +17,6 @@ import lightning as pl
 import stable_pretraining as spt
 import torch
 import torchmetrics
-from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf
 
 from physics_ssl.callbacks import RegressionProbe
@@ -148,6 +147,13 @@ def run(cfg):
     # ---------------- Trainer ----------------
     logger = None
     if cfg.wandb.enabled:
+        try:
+            from lightning.pytorch.loggers import WandbLogger
+        except ImportError as e:
+            raise ImportError(
+                "wandb is an optional dependency. Install with `pip install wandb` "
+                "or set `wandb.enabled=false`."
+            ) from e
         logger = WandbLogger(**cfg.wandb.config)
         logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
 
