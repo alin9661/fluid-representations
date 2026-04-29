@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Data + experiment artefacts
+cache/
+outputs/
+checkpoints/
+wandb/
+lightning_logs/
+multirun/
+*.h5
+*.hdf5
+*.npz
+
+# OS
+Thumbs.db
