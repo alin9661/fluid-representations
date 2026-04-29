@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fluid-representations"
+version = "0.1.0"
+description = "Temporal-AR JEPA on physics video data, on top of stable-pretraining"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.0",
+  "lightning>=2.0",
+  "stable-pretraining",
+  "transformers",
+  "torchmetrics",
+  "einops",
+  "h5py",
+  "numpy",
+  "hydra-core",
+  "omegaconf",
+  "loguru",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-cov"]
+wandb = ["wandb"]
+
+[tool.setuptools.packages.find]
+include = ["physics_ssl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
