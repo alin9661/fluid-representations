@@ -84,4 +84,26 @@ wandb:
     entity: "al6956-new-york-university"
     project: tjepa-active-matter
     name: tjepa-am
-    log_model: false
+    log_model: true
+
+# -------- Checkpointing ------------------------------------------------------
+# Two-track strategy:
+#   - periodic: save every N epochs, keep all (full trajectory for analysis).
+#   - best:     save top-K by a probe metric (best for downstream finetuning).
+# When wandb.config.log_model=true, both tracks are auto-uploaded as W&B
+# Artifacts by `WandbLogger`.
+checkpoint:
+  dirpath: checkpoints/${wandb.config.name}
+  periodic:
+    every_n_epochs: 10
+    save_top_k: -1
+    save_last: true
+    filename: "epoch{epoch:03d}"
+  best:
+    # `eval/knn_probe_acc` is logged per-epoch by OnlineKNN. If the KNN probe
+    # is disabled, override this to `eval/regprobe_mse` (mode=min) at run time.
+    monitor: eval/knn_probe_acc
+    mode: max
+    save_top_k: 3
+    filename: "best-{epoch:03d}"
+    auto_insert_metric_name: false

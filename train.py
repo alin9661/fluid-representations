@@ -17,6 +17,7 @@ import lightning as pl
 import stable_pretraining as spt
 import torch
 import torchmetrics
+from lightning.pytorch.callbacks import ModelCheckpoint
 from omegaconf import OmegaConf
 
 from physics_ssl.callbacks import RegressionProbe
@@ -143,6 +144,29 @@ def run(cfg):
             targets=tuple(cfg.probes.regression.targets),
             in_features=embed_dim,
         ))
+
+    # ---------------- Checkpointing ----------------
+    ckpt_dir = Path(cfg.checkpoint.dirpath)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    callbacks.append(
+        ModelCheckpoint(
+            dirpath=str(ckpt_dir),
+            every_n_epochs=cfg.checkpoint.periodic.every_n_epochs,
+            save_top_k=cfg.checkpoint.periodic.save_top_k,
+            save_last=cfg.checkpoint.periodic.save_last,
+            filename=cfg.checkpoint.periodic.filename,
+        )
+    )
+    callbacks.append(
+        ModelCheckpoint(
+            dirpath=str(ckpt_dir),
+            monitor=cfg.checkpoint.best.monitor,
+            mode=cfg.checkpoint.best.mode,
+            save_top_k=cfg.checkpoint.best.save_top_k,
+            filename=cfg.checkpoint.best.filename,
+            auto_insert_metric_name=cfg.checkpoint.best.auto_insert_metric_name,
+        )
+    )
 
     # ---------------- Trainer ----------------
     logger = None
