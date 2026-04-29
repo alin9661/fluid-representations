@@ -79,9 +79,9 @@ probes:
 
 # -------- W&B ----------------------------------------------------------------
 wandb:
-  enabled: false
+  enabled: true
   config:
-    entity: ""
+    entity: "al6956-new-york-university"
     project: tjepa-active-matter
     name: tjepa-am
     log_model: false
