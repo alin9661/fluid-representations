@@ -146,11 +146,41 @@ def run(cfg):
         ))
 
     # ---------------- Checkpointing ----------------
-    ckpt_dir = Path(cfg.checkpoint.dirpath)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    # Validate that the best-track monitor metric will actually be produced by
+    # an enabled probe; otherwise the best `ModelCheckpoint` silently writes
+    # zero files and the user only notices days into a run.
+    _PROBE_METRIC_TO_FLAG = {
+        "eval/knn_probe_acc": "knn",
+        "eval/linear_probe_acc": "linear",
+        "eval/regprobe_mse_alpha": "regression",
+        "eval/regprobe_mse_zeta": "regression",
+        "eval/regprobe_r2": "regression",
+    }
+    monitor = cfg.checkpoint.best.monitor
+    required_probe = _PROBE_METRIC_TO_FLAG.get(monitor)
+    if required_probe is not None and not cfg.probes[required_probe].enabled:
+        raise ValueError(
+            f"checkpoint.best.monitor={monitor!r} requires "
+            f"probes.{required_probe}.enabled=true. Either enable that probe "
+            f"or set checkpoint.best.monitor to a metric from an enabled "
+            f"probe (see configs/tjepa_active_matter.yaml)."
+        )
+
+    # Resolve relative to the project root, not Hydra's per-run CWD.
+    ckpt_dir = Path(hydra.utils.to_absolute_path(cfg.checkpoint.dirpath))
+    periodic_dir = ckpt_dir / "periodic"
+    best_dir = ckpt_dir / "best"
+    periodic_dir.mkdir(parents=True, exist_ok=True)
+    best_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[checkpointing] writing to {ckpt_dir}")
+    if cfg.wandb.config.log_model and not cfg.wandb.enabled:
+        print(
+            "[warn] wandb.config.log_model=true is a no-op when "
+            "wandb.enabled=false; checkpoints will only be saved locally."
+        )
     callbacks.append(
         ModelCheckpoint(
-            dirpath=str(ckpt_dir),
+            dirpath=str(periodic_dir),
             every_n_epochs=cfg.checkpoint.periodic.every_n_epochs,
             save_top_k=cfg.checkpoint.periodic.save_top_k,
             save_last=cfg.checkpoint.periodic.save_last,
@@ -159,7 +189,7 @@ def run(cfg):
     )
     callbacks.append(
         ModelCheckpoint(
-            dirpath=str(ckpt_dir),
+            dirpath=str(best_dir),
             monitor=cfg.checkpoint.best.monitor,
             mode=cfg.checkpoint.best.mode,
             save_top_k=cfg.checkpoint.best.save_top_k,

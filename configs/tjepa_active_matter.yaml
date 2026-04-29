@@ -87,21 +87,24 @@ wandb:
     log_model: true
 
 # -------- Checkpointing ------------------------------------------------------
-# Two-track strategy:
-#   - periodic: save every N epochs, keep all (full trajectory for analysis).
-#   - best:     save top-K by a probe metric (best for downstream finetuning).
-# When wandb.config.log_model=true, both tracks are auto-uploaded as W&B
-# Artifacts by `WandbLogger`.
+# Two tracks: periodic keeps the full epoch trajectory for post-hoc analysis;
+# best keeps top-K by probe metric for downstream finetuning. Both auto-upload
+# as W&B Artifacts when `wandb.config.log_model=true`.
 checkpoint:
-  dirpath: checkpoints/${wandb.config.name}
+  # `${now:...}` makes each run unique so re-runs don't overwrite prior ckpts.
+  # Resolved against the original CWD via `hydra.utils.to_absolute_path` in
+  # train.py, so it lands at <project_root>/checkpoints/<name>/<timestamp>/
+  # regardless of Hydra's per-run CWD switch.
+  dirpath: checkpoints/${wandb.config.name}/${now:%Y%m%d_%H%M%S}
   periodic:
     every_n_epochs: 10
     save_top_k: -1
     save_last: true
     filename: "epoch{epoch:03d}"
   best:
-    # `eval/knn_probe_acc` is logged per-epoch by OnlineKNN. If the KNN probe
-    # is disabled, override this to `eval/regprobe_mse` (mode=min) at run time.
+    # train.py validates that this metric belongs to an enabled probe at
+    # startup. Switch to `eval/regprobe_mse_alpha` (mode=min) or
+    # `eval/regprobe_r2` (mode=max) when KNN is disabled.
     monitor: eval/knn_probe_acc
     mode: max
     save_top_k: 3
