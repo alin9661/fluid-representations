@@ -9,38 +9,61 @@ Adapted from `le-wm/train.py:18-46` (`lejepa_forward`). Differences:
   output dict so probe callbacks (`OnlineKNN`, `OnlineProbe`,
   `RegressionProbe`) can read them via `get_data_from_batch_or_outputs`.
 
-The optional EB-JEPA-style multistep parallel unroll (`eb_jepa/jepa.py:142-157`)
-is gated by `cfg.wm.nsteps > 1`; default is single-step (`nsteps=1`).
+The optional multistep unroll (`cfg.wm.nsteps > 1`) is a sliding-window
+autoregressive rollout in the spirit of `le-wm/jepa.py:61-110`: at each step
+the predictor emits one new embedding, the oldest history step is dropped, the
+new prediction is appended, and the target window is shifted by one. This
+shares the exposure-bias mitigation goal of EB-JEPA's parallel-unroll
+(`eb_jepa/eb_jepa/jepa.py:142-157`) but is structurally different — EB-JEPA
+prepends GT context each iter; we slide.
 """
 
 from functools import partial
 
 import torch
-import torch.nn.functional as F
 
 
 def _encode_per_frame(self, video: torch.Tensor) -> torch.Tensor:
     """(B, C, T, H, W) -> (B, T, D)."""
     B, C, T, H, W = video.shape
     frames = video.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
-    out = self.encoder(pixel_values=frames, interpolate_pos_encoding=True)
+    out = self.model.encoder(pixel_values=frames, interpolate_pos_encoding=True)
     cls = out.last_hidden_state[:, 0]
-    proj = self.projector(cls)
+    proj = self.model.projector(cls)
     return proj.view(B, T, -1)
+
+
+def _resolve_unconditional(cfg) -> bool:
+    """Read the unconditional flag from either `cfg.predictor.unconditional`
+    (training config layout) or `cfg.predictor_unconditional` (legacy flat).
+    """
+    pred_cfg = getattr(cfg, "predictor", None)
+    if pred_cfg is not None and hasattr(pred_cfg, "unconditional"):
+        return bool(pred_cfg.unconditional)
+    return bool(getattr(cfg, "predictor_unconditional", False))
 
 
 def tjepa_forward(self, batch, stage, cfg=None):
     """Temporal-AR JEPA forward.
 
     Args:
-        self: the `spt.Module` (gives access to encoder, projector, predictor,
-            cond_embedder, sigreg).
+        self: the `spt.Module` (gives access to `model.encoder`,
+            `model.projector`, `model.predictor`, `model.cond_embedder`, and
+            `sigreg`).
         batch: dict with keys `video`, `label`, `alpha`, `zeta` from
             `ActiveMatterVideoDataset`.
         stage: 'fit' | 'validate'.
-        cfg: a small dict-like with `wm.history_size`, `wm.num_preds`,
-            `wm.nsteps`, `loss.sigreg.weight`, and an optional
-            `predictor_unconditional` flag.
+        cfg: dict-like with `wm.history_size`, `wm.num_preds`, `wm.nsteps`,
+            `loss.sigreg.weight`, and `predictor.unconditional`.
+
+    Invariant:
+        ``num_frames == history_size + num_preds + (nsteps - 1)``. With the
+        default ``nsteps == 1`` this collapses to LeWM's
+        ``T = ctx_len + n_preds`` so the predictor output length and the
+        target window length agree exactly. Each additional multistep
+        iteration needs exactly one more future frame so the rolled target
+        window stays in-bounds. We assert at runtime to fail loud on
+        misconfiguration.
     """
     if cfg is None:
         raise ValueError("tjepa_forward requires `cfg` (use functools.partial).")
@@ -50,45 +73,59 @@ def tjepa_forward(self, batch, stage, cfg=None):
     emb = _encode_per_frame(self, video)                       # (B, T, D)
     T = emb.size(1)
 
-    # Per-video conditioning [alpha, zeta] broadcast across T frames.
-    if getattr(cfg, "predictor_unconditional", False):
-        cond = None
-    else:
-        scalars = torch.stack(
-            [batch["alpha"].float(), batch["zeta"].float()], dim=-1
-        )                                                       # (B, 2)
-        cond = self.cond_embedder(scalars.unsqueeze(1).expand(B, T, 2))  # (B, T, D)
-
     ctx_len = int(cfg.wm.history_size)
     n_preds = int(cfg.wm.num_preds)
     nsteps = int(getattr(cfg.wm, "nsteps", 1))
     lambd = float(cfg.loss.sigreg.weight)
 
-    # Single-step (LeWM) path: predict frames [n_preds:] from history [:ctx_len].
+    if ctx_len <= 0 or n_preds <= 0 or nsteps <= 0:
+        raise ValueError(
+            f"history_size, num_preds, and nsteps must be positive; got "
+            f"history_size={ctx_len}, num_preds={n_preds}, nsteps={nsteps}"
+        )
+    expected_T = ctx_len + n_preds + (nsteps - 1)
+    if expected_T != T:
+        raise ValueError(
+            f"LeWM invariant violated: history_size + num_preds + (nsteps - 1) "
+            f"= {expected_T} must equal video length T = {T}. "
+            f"Adjust cfg.data.num_frames or cfg.wm.{{history_size,num_preds,nsteps}}."
+        )
+
+    if _resolve_unconditional(cfg):
+        cond = None
+    else:
+        scalars = torch.stack(
+            [batch["alpha"].float(), batch["zeta"].float()], dim=-1
+        )                                                       # (B, 2)
+        cond = self.model.cond_embedder(scalars.unsqueeze(1).expand(B, T, 2))  # (B, T, D)
+
     ctx_emb = emb[:, :ctx_len]
     ctx_cond = None if cond is None else cond[:, :ctx_len]
-    tgt_emb = emb[:, n_preds:].detach()
 
     if nsteps <= 1:
-        pred_emb = self.predictor(ctx_emb, ctx_cond)
-        # Align lengths: predictor returns (B, ctx_len, D); target is (B, T-n_preds, D).
-        # LeWM convention: shift comparison so we predict the next-step embedding.
-        L = min(pred_emb.size(1), tgt_emb.size(1))
-        pred_loss = (pred_emb[:, :L] - tgt_emb[:, :L]).pow(2).mean()
+        # Single-step LeWM: predict (B, ctx_len, D), compare to emb shifted by n_preds.
+        pred_emb = self.model.predictor(ctx_emb, ctx_cond)
+        tgt_emb = emb[:, n_preds : n_preds + ctx_len].detach()
+        # Lengths now match by invariant; assert in case the predictor changed shape.
+        assert pred_emb.shape == tgt_emb.shape, (pred_emb.shape, tgt_emb.shape)
+        pred_loss = (pred_emb - tgt_emb).pow(2).mean()
     else:
-        # EB-JEPA parallel unroll: refeed GT history each step, average loss.
-        pred_loss = 0.0
+        # Sliding-window AR rollout: at step k the target is shifted by (n_preds + k).
+        # Each iter compares the predictor's output to GT future embeddings starting
+        # from frame (n_preds + k); the worst-case last step targets emb[:, n_preds+nsteps-1:].
+        losses = []
         cur = ctx_emb
         cur_cond = ctx_cond
-        for _ in range(nsteps):
-            pred_emb = self.predictor(cur, cur_cond)
-            # Align lengths to target window for this iter.
-            L = min(pred_emb.size(1), tgt_emb.size(1))
-            pred_loss = pred_loss + (pred_emb[:, :L] - tgt_emb[:, :L]).pow(2).mean() / nsteps
+        for step in range(nsteps):
+            pred_emb = self.model.predictor(cur, cur_cond)
+            tgt_window = emb[:, n_preds + step : n_preds + step + ctx_len].detach()
+            assert pred_emb.shape == tgt_window.shape, (pred_emb.shape, tgt_window.shape, step)
+            losses.append((pred_emb - tgt_window).pow(2).mean())
             # Refeed: drop oldest history step, append the model's last prediction.
             cur = torch.cat([cur[:, 1:], pred_emb[:, -1:]], dim=1)
             if cur_cond is not None:
                 cur_cond = torch.cat([cur_cond[:, 1:], cur_cond[:, -1:]], dim=1)
+        pred_loss = torch.stack(losses).mean()
 
     sigreg_loss = self.sigreg(emb.transpose(0, 1))             # (T, B, D)
     loss = pred_loss + lambd * sigreg_loss
@@ -109,7 +146,13 @@ def tjepa_forward(self, batch, stage, cfg=None):
 
 
 def build_tjepa_module(*, encoder, projector, cond_embedder, predictor, sigreg, cfg, optim):
-    """Convenience constructor that bundles modules into a `stable_pretraining.Module`."""
+    """Bundle the four learnable modules into a single `spt.Module`.
+
+    All four submodules are registered exclusively under `self.model.<name>`
+    via the `ModuleDict` bundle so the optimizer scope `modules: "model"`
+    covers them without duplicate registration via `**kwargs`. `tjepa_forward`
+    accesses them as `self.model.encoder`, `self.model.projector`, etc.
+    """
     import stable_pretraining as spt
     from torch import nn
 
@@ -123,10 +166,6 @@ def build_tjepa_module(*, encoder, projector, cond_embedder, predictor, sigreg, 
     )
     return spt.Module(
         model=bundle,
-        encoder=encoder,
-        projector=projector,
-        cond_embedder=cond_embedder,
-        predictor=predictor,
         sigreg=sigreg,
         forward=partial(tjepa_forward, cfg=cfg),
         optim=optim,
