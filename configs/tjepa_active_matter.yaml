@@ -79,9 +79,34 @@ probes:
 
 # -------- W&B ----------------------------------------------------------------
 wandb:
-  enabled: false
+  enabled: true
   config:
-    entity: ""
+    entity: "al6956-new-york-university"
     project: tjepa-active-matter
     name: tjepa-am
-    log_model: false
+    log_model: true
+
+# -------- Checkpointing ------------------------------------------------------
+# Two tracks: periodic keeps the full epoch trajectory for post-hoc analysis;
+# best keeps top-K by probe metric for downstream finetuning. Both auto-upload
+# as W&B Artifacts when `wandb.config.log_model=true`.
+checkpoint:
+  # `${now:...}` makes each run unique so re-runs don't overwrite prior ckpts.
+  # Resolved against the original CWD via `hydra.utils.to_absolute_path` in
+  # train.py, so it lands at <project_root>/checkpoints/<name>/<timestamp>/
+  # regardless of Hydra's per-run CWD switch.
+  dirpath: checkpoints/${wandb.config.name}/${now:%Y%m%d_%H%M%S}
+  periodic:
+    every_n_epochs: 10
+    save_top_k: -1
+    save_last: true
+    filename: "epoch{epoch:03d}"
+  best:
+    # train.py validates that this metric belongs to an enabled probe at
+    # startup. Switch to `eval/regprobe_mse_alpha` (mode=min) or
+    # `eval/regprobe_r2` (mode=max) when KNN is disabled.
+    monitor: eval/knn_probe_acc
+    mode: max
+    save_top_k: 3
+    filename: "best-{epoch:03d}"
+    auto_insert_metric_name: false
