@@ -47,10 +47,66 @@ from torch.utils.data import Dataset
 logger = logging.getLogger(__name__)
 
 
-# 4x4 grid of (alpha, zeta) -> 16 bins for classification probes. The exact
-# physical ranges for Active Matter in The Well: alpha in {-1, 0, 1, 3, 5},
-# zeta in {1, 3, 5, 7, 9, 11, 13, 15, 17}. We z-score then quantile-bin.
+# 4x4 grid of (alpha, zeta) -> 16 bins for classification probes. Bin edges
+# are quantile-cut on raw α/ζ; regression targets are z-scored separately
+# (see `_compute_label_edges`). The exact physical ranges for Active Matter in
+# The Well: alpha in {-1, 0, 1, 3, 5}, zeta in {1, 3, 5, 7, 9, 11, 13, 15, 17}.
 _DEFAULT_BINS = 4
+_PARAM_STD_EPS = 1e-6
+_PARAM_STATS_KEYS = ("alpha_mean", "alpha_std", "zeta_mean", "zeta_std")
+
+
+def _stats_with_warning(values: np.ndarray, *, name: str, split: str) -> tuple[float, float]:
+    """Population mean/std with a warning when std is near zero.
+
+    Mirrors the convention in `compute_stats` (warns on near-zero variance for
+    video channels) — a constant α/ζ split is almost always a data-integrity
+    bug (mis-mapped HDF5 scalar, single-value sweep, broken shard discovery)
+    and silently scaling by 1/eps would produce ±1e6-magnitude regression
+    targets that explode the probe loss. We surface the bug, then floor.
+    """
+    mean = float(values.mean())
+    std_raw = float(values.std())
+    if std_raw < _PARAM_STD_EPS:
+        logger.warning(
+            "%s has near-zero variance on split=%s (std=%.3e) — likely a "
+            "data-integrity bug; flooring std at %g. Normalized targets will "
+            "be unstable and the regression probe metrics will be meaningless.",
+            name, split, std_raw, _PARAM_STD_EPS,
+        )
+    return mean, max(std_raw, _PARAM_STD_EPS)
+
+
+def _unpack_param_stats(stats: dict) -> tuple[float, float, float, float]:
+    """Validate and unpack a `param_stats` dict in canonical order.
+
+    Validation here (vs. trusting the caller) catches yaml/JSON-driven typos
+    and hand-rolled stat dicts before they silently corrupt downstream
+    normalization — e.g. a negative `*_std` would flip the sign of every
+    normalized target without raising anywhere.
+    """
+    missing = [k for k in _PARAM_STATS_KEYS if k not in stats]
+    if missing:
+        raise ValueError(
+            f"param_stats missing keys: {missing}. Expected: {list(_PARAM_STATS_KEYS)}"
+        )
+    unpacked = {}
+    for k in _PARAM_STATS_KEYS:
+        try:
+            unpacked[k] = float(stats[k])
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"param_stats[{k!r}]={stats[k]!r} is not numeric") from e
+    for k in ("alpha_std", "zeta_std"):
+        if not (unpacked[k] > 0 and np.isfinite(unpacked[k])):
+            raise ValueError(
+                f"param_stats[{k!r}]={unpacked[k]!r} must be a positive finite float"
+            )
+    return (
+        unpacked["alpha_mean"],
+        unpacked["alpha_std"],
+        unpacked["zeta_mean"],
+        unpacked["zeta_std"],
+    )
 
 
 class ActiveMatterVideoDataset(Dataset):
@@ -235,15 +291,17 @@ class ActiveMatterVideoDataset(Dataset):
         self._dtype = dtype
 
     def _compute_label_edges(self):
-        """Quantile bin edges + z-score stats for alpha/zeta over this split.
+        """Quantile bin edges (raw scale) + z-score stats for alpha/zeta.
 
-        Using quantiles for the bin edges avoids one-bin-collapsed cases when
-        the parameter grid is highly non-uniform.
+        Bin edges use quantiles on the raw scalars to avoid one-bin-collapsed
+        cases on a highly non-uniform parameter grid; classification labels are
+        a function of these raw-scale edges only.
 
         Z-score stats: if `param_stats` was supplied at construction (val using
-        train stats), those are adopted instead of computing per-split — so the
-        regression probe head trained on train z-scores is evaluated against
-        identically-scaled val z-scores.
+        train stats), those are validated and adopted so the probe head trained
+        on train z-scores is evaluated against identically-scaled val targets.
+        Otherwise computed per-split via `_stats_with_warning`, which warns
+        loudly on near-zero variance (likely a data-integrity bug).
         """
         all_a = np.concatenate([s["alpha"] for s in self._scalars_per_file.values()])
         all_z = np.concatenate([s["zeta"] for s in self._scalars_per_file.values()])
@@ -253,17 +311,16 @@ class ActiveMatterVideoDataset(Dataset):
         self._zeta_edges = np.quantile(all_z, qs).astype(np.float32) if qs.size else np.array([], dtype=np.float32)
 
         if self._provided_param_stats is not None:
-            s = self._provided_param_stats
-            self._alpha_mean = float(s["alpha_mean"])
-            self._alpha_std = float(s["alpha_std"])
-            self._zeta_mean = float(s["zeta_mean"])
-            self._zeta_std = float(s["zeta_std"])
+            self._alpha_mean, self._alpha_std, self._zeta_mean, self._zeta_std = (
+                _unpack_param_stats(self._provided_param_stats)
+            )
         else:
-            eps = 1e-6
-            self._alpha_mean = float(all_a.mean())
-            self._alpha_std = float(all_a.std() + eps)
-            self._zeta_mean = float(all_z.mean())
-            self._zeta_std = float(all_z.std() + eps)
+            self._alpha_mean, self._alpha_std = _stats_with_warning(
+                all_a, name="α", split=self.split
+            )
+            self._zeta_mean, self._zeta_std = _stats_with_warning(
+                all_z, name="ζ", split=self.split
+            )
 
     @property
     def param_stats(self) -> dict:

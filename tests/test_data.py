@@ -25,9 +25,9 @@ def test_dataset_shape_and_keys(synthetic_active_matter_shard):
     assert sample["alpha_raw"] in (1.0, 3.0)
     assert sample["zeta_raw"] in (5.0, 7.0)
     # Normalized: with α∈{1.0, 3.0} (mean=2, std=1) and ζ∈{5.0, 7.0} (mean=6, std=1),
-    # normalized values are ±1 within the +1e-6 std floor.
-    assert min(abs(sample["alpha"] - 1.0), abs(sample["alpha"] + 1.0)) < 1e-4
-    assert min(abs(sample["zeta"] - 1.0), abs(sample["zeta"] + 1.0)) < 1e-4
+    # std is well above the floor so normalized values are exactly ±1.
+    assert min(abs(sample["alpha"] - 1.0), abs(sample["alpha"] + 1.0)) < 1e-6
+    assert min(abs(sample["zeta"] - 1.0), abs(sample["zeta"] + 1.0)) < 1e-6
 
 
 def test_alpha_zeta_zscore_normalization(synthetic_active_matter_shard):
@@ -95,6 +95,49 @@ def test_param_stats_property_and_val_uses_train_stats(shard_factory):
         f"val with own stats ({a_self}) should differ from val with train stats ({a_train})"
     )
     assert a_train == pytest.approx(-1.0, abs=1e-4)
+
+
+def test_constant_alpha_warns_and_floors_std(shard_factory, caplog):
+    """Constant α (std=0) warns loudly and floors std at eps — not silent.
+
+    Mirrors the convention in `compute_stats` (warns on near-zero channel
+    variance). Without this guard, normalized α would be `(x - mean) / 1e-6`
+    ⇒ ±1e6-magnitude regression targets that explode probe loss while the
+    user blames the optimizer.
+    """
+    root = shard_factory(alpha=(2.0, 2.0), zeta=(5.0, 7.0), T=8, H=8, W=8)
+    with caplog.at_level(logging.WARNING, logger="physics_ssl.data"):
+        ds = ActiveMatterVideoDataset(
+            root=root, split="train", num_frames=4, bins_per_param=2,
+        )
+    assert any("near-zero variance" in rec.message for rec in caplog.records)
+    # Floored exactly at eps (max(0, eps), not 0+eps).
+    assert ds.param_stats["alpha_std"] == pytest.approx(1e-6, abs=1e-12)
+    # Normalized α stays bounded — `(2.0 - 2.0)/1e-6 = 0`, not blown up.
+    sample = ds[0]
+    assert sample["alpha"] == pytest.approx(0.0, abs=1e-9)
+    assert sample["alpha_raw"] == 2.0
+
+
+def test_param_stats_validation_rejects_bad_input(shard_factory):
+    """`param_stats=` adoption validates keys, types, and positivity up front."""
+    root = shard_factory(subdir="valid", alpha=(1.0, 3.0), zeta=(5.0, 7.0), T=8, H=8, W=8)
+    base_kwargs = dict(root=root, split="valid", num_frames=4, bins_per_param=2)
+
+    with pytest.raises(ValueError, match="missing keys"):
+        ActiveMatterVideoDataset(**base_kwargs, param_stats={"alpha_mean": 0.0})
+
+    bad_type = {"alpha_mean": "x", "alpha_std": 1.0, "zeta_mean": 0.0, "zeta_std": 1.0}
+    with pytest.raises(ValueError, match="not numeric"):
+        ActiveMatterVideoDataset(**base_kwargs, param_stats=bad_type)
+
+    for bad_std in (0.0, -1.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="positive finite float"):
+            ActiveMatterVideoDataset(
+                **base_kwargs,
+                param_stats={"alpha_mean": 0.0, "alpha_std": bad_std,
+                             "zeta_mean": 0.0, "zeta_std": 1.0},
+            )
 
 
 def test_window_indexing_count(shard_factory):
