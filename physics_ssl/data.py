@@ -79,6 +79,7 @@ class ActiveMatterVideoDataset(Dataset):
         resolution: Optional[tuple[int, int]] = None,
         transform=None,
         bins_per_param: int = _DEFAULT_BINS,
+        param_stats: Optional[dict] = None,
         max_open_files: int = 6,
         rdcc_nbytes: int = 512 * 1024 ** 2,
         rdcc_nslots: int = 1_000_003,
@@ -99,6 +100,11 @@ class ActiveMatterVideoDataset(Dataset):
         self.resolution = tuple(resolution) if resolution is not None else None
         self.transform = transform
         self.bins_per_param = int(bins_per_param)
+        # Read by `_compute_label_edges`: if non-None, adopt these stats instead
+        # of computing per-split. Used to share train-set α/ζ z-score stats with
+        # val so the regression probe head is evaluated against identically
+        # scaled targets.
+        self._provided_param_stats = param_stats
 
         if self.bins_per_param < 2:
             raise ValueError(
@@ -229,10 +235,15 @@ class ActiveMatterVideoDataset(Dataset):
         self._dtype = dtype
 
     def _compute_label_edges(self):
-        """Quantile bin edges for alpha/zeta, computed once over the whole split.
+        """Quantile bin edges + z-score stats for alpha/zeta over this split.
 
-        Using quantiles avoids one-bin-collapsed cases when the parameter grid
-        is highly non-uniform.
+        Using quantiles for the bin edges avoids one-bin-collapsed cases when
+        the parameter grid is highly non-uniform.
+
+        Z-score stats: if `param_stats` was supplied at construction (val using
+        train stats), those are adopted instead of computing per-split — so the
+        regression probe head trained on train z-scores is evaluated against
+        identically-scaled val z-scores.
         """
         all_a = np.concatenate([s["alpha"] for s in self._scalars_per_file.values()])
         all_z = np.concatenate([s["zeta"] for s in self._scalars_per_file.values()])
@@ -240,6 +251,29 @@ class ActiveMatterVideoDataset(Dataset):
         qs = np.linspace(0, 1, n + 1)[1:-1]
         self._alpha_edges = np.quantile(all_a, qs).astype(np.float32) if qs.size else np.array([], dtype=np.float32)
         self._zeta_edges = np.quantile(all_z, qs).astype(np.float32) if qs.size else np.array([], dtype=np.float32)
+
+        if self._provided_param_stats is not None:
+            s = self._provided_param_stats
+            self._alpha_mean = float(s["alpha_mean"])
+            self._alpha_std = float(s["alpha_std"])
+            self._zeta_mean = float(s["zeta_mean"])
+            self._zeta_std = float(s["zeta_std"])
+        else:
+            eps = 1e-6
+            self._alpha_mean = float(all_a.mean())
+            self._alpha_std = float(all_a.std() + eps)
+            self._zeta_mean = float(all_z.mean())
+            self._zeta_std = float(all_z.std() + eps)
+
+    @property
+    def param_stats(self) -> dict:
+        """Mean/std for α and ζ — pass to the val dataset to share train stats."""
+        return {
+            "alpha_mean": self._alpha_mean,
+            "alpha_std": self._alpha_std,
+            "zeta_mean": self._zeta_mean,
+            "zeta_std": self._zeta_std,
+        }
 
     def _bin(self, a: float, z: float) -> int:
         a_bin = int(np.searchsorted(self._alpha_edges, a))
@@ -346,14 +380,18 @@ class ActiveMatterVideoDataset(Dataset):
             video = self.transform(video)
 
         scalars = self._scalars_per_file[file_id]
-        alpha = float(scalars["alpha"][obj_id])
-        zeta = float(scalars["zeta"][obj_id])
+        alpha_raw = float(scalars["alpha"][obj_id])
+        zeta_raw = float(scalars["zeta"][obj_id])
+        alpha = (alpha_raw - self._alpha_mean) / self._alpha_std
+        zeta = (zeta_raw - self._zeta_mean) / self._zeta_std
 
         return {
             "video": video,
-            "label": self._bin(alpha, zeta),
+            "label": self._bin(alpha_raw, zeta_raw),
             "alpha": alpha,
             "zeta": zeta,
+            "alpha_raw": alpha_raw,
+            "zeta_raw": zeta_raw,
         }
 
     def __getstate__(self):

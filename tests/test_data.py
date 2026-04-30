@@ -16,13 +16,85 @@ def test_dataset_shape_and_keys(synthetic_active_matter_shard):
     )
     assert len(ds) > 0
     sample = ds[0]
-    assert set(sample.keys()) == {"video", "label", "alpha", "zeta"}
+    assert set(sample.keys()) == {"video", "label", "alpha", "zeta", "alpha_raw", "zeta_raw"}
     assert sample["video"].shape == (11, 4, 16, 16)
     assert sample["video"].dtype == torch.float32
     assert isinstance(sample["label"], int)
     assert 0 <= sample["label"] < 4
-    assert sample["alpha"] in (1.0, 3.0)
-    assert sample["zeta"] in (5.0, 7.0)
+    # Raw values match the conftest fixture's per-object α/ζ assignment.
+    assert sample["alpha_raw"] in (1.0, 3.0)
+    assert sample["zeta_raw"] in (5.0, 7.0)
+    # Normalized: with α∈{1.0, 3.0} (mean=2, std=1) and ζ∈{5.0, 7.0} (mean=6, std=1),
+    # normalized values are ±1 within the +1e-6 std floor.
+    assert min(abs(sample["alpha"] - 1.0), abs(sample["alpha"] + 1.0)) < 1e-4
+    assert min(abs(sample["zeta"] - 1.0), abs(sample["zeta"] + 1.0)) < 1e-4
+
+
+def test_alpha_zeta_zscore_normalization(synthetic_active_matter_shard):
+    """All normalized α/ζ across the dataset have mean ≈ 0 and std ≈ 1.
+
+    With the conftest fixture (α=(1.0, 3.0), ζ=(5.0, 7.0), 4 windows per obj × 2
+    objs = 8 windows), train mean is exactly (2, 6) and population std is (1, 1),
+    so normalized values are ±1 and span the dataset symmetrically.
+    """
+    ds = ActiveMatterVideoDataset(
+        root=synthetic_active_matter_shard, split="train",
+        num_frames=4, bins_per_param=2, transform=None,
+    )
+    alphas = np.array([ds[i]["alpha"] for i in range(len(ds))])
+    zetas = np.array([ds[i]["zeta"] for i in range(len(ds))])
+    assert abs(alphas.mean()) < 1e-4
+    assert abs(alphas.std() - 1.0) < 1e-3
+    assert abs(zetas.mean()) < 1e-4
+    assert abs(zetas.std() - 1.0) < 1e-3
+
+
+def test_param_stats_property_and_val_uses_train_stats(shard_factory):
+    """`val_ds(param_stats=train_ds.param_stats)` normalizes val against train
+    statistics, not its own — preventing probe-metric drift between splits.
+    """
+    # Train: α∈{1.0, 3.0} ⇒ mean=2.0, std=1.0.
+    root = shard_factory(
+        subdir="train", alpha=(1.0, 3.0), zeta=(5.0, 7.0), T=8, H=8, W=8,
+    )
+    train_ds = ActiveMatterVideoDataset(
+        root=root, split="train", num_frames=4, bins_per_param=2,
+    )
+    stats = train_ds.param_stats
+    assert set(stats.keys()) == {"alpha_mean", "alpha_std", "zeta_mean", "zeta_std"}
+    assert stats["alpha_mean"] == pytest.approx(2.0, abs=1e-5)
+    assert stats["alpha_std"] == pytest.approx(1.0, abs=1e-3)
+    assert stats["zeta_mean"] == pytest.approx(6.0, abs=1e-5)
+    assert stats["zeta_std"] == pytest.approx(1.0, abs=1e-3)
+
+    # Val with a deliberately *different* α distribution so per-split stats
+    # disagree with train stats: α∈{1.0, 5.0, 9.0} ⇒ mean=5.0, std≈3.27.
+    # norm(1.0) ≈ -1.22 under val's own stats, but -1.0 under train stats.
+    shard_factory(
+        subdir="valid", n_objs=3, alpha=(1.0, 5.0, 9.0), zeta=(5.0, 7.0, 9.0),
+        T=8, H=8, W=8,
+    )
+    val_no_stats = ActiveMatterVideoDataset(
+        root=root, split="valid", num_frames=4, bins_per_param=2,
+    )
+    val_with_stats = ActiveMatterVideoDataset(
+        root=root, split="valid", num_frames=4, bins_per_param=2,
+        param_stats=train_ds.param_stats,
+    )
+
+    def alpha_at_raw_1(ds):
+        for i in range(len(ds)):
+            s = ds[i]
+            if s["alpha_raw"] == 1.0:
+                return s["alpha"]
+        raise AssertionError("no sample with alpha_raw=1.0")
+
+    a_self = alpha_at_raw_1(val_no_stats)
+    a_train = alpha_at_raw_1(val_with_stats)
+    assert abs(a_self - a_train) > 0.1, (
+        f"val with own stats ({a_self}) should differ from val with train stats ({a_train})"
+    )
+    assert a_train == pytest.approx(-1.0, abs=1e-4)
 
 
 def test_window_indexing_count(shard_factory):
