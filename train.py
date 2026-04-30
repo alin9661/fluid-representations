@@ -50,6 +50,7 @@ def run(cfg):
         num_frames=cfg.data.num_frames,
         transform=transform,
         bins_per_param=cfg.data.bins_per_param,
+        param_stats=train_set.param_stats,
     )
     train_loader = torch.utils.data.DataLoader(
         train_set, shuffle=True, drop_last=True, **cfg.loader,
