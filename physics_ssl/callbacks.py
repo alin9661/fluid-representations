@@ -151,6 +151,16 @@ class RegressionProbe(TrainableCallback):
                     metric(preds.detach(), y)
                     metric_logs[f"eval/{callback.name}_{metric_name}"] = metric
 
+            elif stage == "test":
+                # spt's metric registry only allocates `_train`/`_val` slots, so
+                # we emit per-dim and overall MSE as plain scalars and let
+                # Lightning's on_epoch reduction average across the test pass.
+                with torch.no_grad():
+                    per_dim = (preds - y).pow(2).mean(dim=0)
+                    for k, v in zip(callback.targets, per_dim.detach().cpu().tolist()):
+                        scalar_logs[f"test/{callback.name}_mse_{k}"] = float(v)
+                    scalar_logs[f"test/{callback.name}_mse"] = (preds - y).pow(2).mean().item()
+
             if scalar_logs:
                 self_module.log_dict(scalar_logs, on_step=True, on_epoch=True, sync_dist=True)
             if metric_logs:
