@@ -110,3 +110,11 @@ checkpoint:
     save_top_k: 3
     filename: "best-{epoch:03d}"
     auto_insert_metric_name: false
+
+# -------- Test-time evaluation (consumed by test.py) -------------------------
+test:
+  # If null, test.py auto-discovers the freshest .ckpt under ${checkpoint.dirpath}/best/.
+  # Set explicitly to evaluate a specific file.
+  checkpoint_path: null
+  # Suffix appended to wandb.config.name so test runs don't clobber the train run.
+  wandb_run_suffix: "-test"
