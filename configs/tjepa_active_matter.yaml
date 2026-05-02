@@ -3,14 +3,14 @@ defaults:
 
 # -------- Top-level knobs (mirrors le-wm/config/train/lewm.yaml hyperparams) --
 seed: 3072
-num_workers: 6
+num_workers: 12
 img_size: 256
 patch_size: 16
-encoder_scale: tiny      # vit_hf size: hidden_dim 192 for 'tiny'
+encoder_scale: tiny # vit_hf size: hidden_dim 192 for 'tiny'
 in_chans: 11
 
 wm:
-  history_size: 3
+  history_size: 15
   num_preds: 1
   embed_dim: 192
   # nsteps>1 enables a sliding-window AR rollout (le-wm/jepa.py:61-110 spirit).
@@ -34,19 +34,20 @@ loss:
       num_proj: 1024
 
 # -------- Data ---------------------------------------------------------------
-# Invariant: data.num_frames == wm.history_size + wm.num_preds (LeWM convention).
-# With history_size=3, num_preds=1, num_frames must be 4. tjepa_forward asserts this.
+# Invariant (asserted in physics_ssl/forward.py):
+#   data.num_frames == wm.history_size + wm.num_preds + (wm.nsteps - 1)
+# With nsteps=1 this collapses to history_size + num_preds == num_frames.
 data:
   root: ${oc.env:THE_WELL_DATA_DIR}/active_matter/data
-  num_frames: 4
+  num_frames: 16
   bins_per_param: 4
   stats_path: cache/active_matter_stats.npz
 
 loader:
-  batch_size: 16
+  batch_size: 32
   num_workers: ${num_workers}
   persistent_workers: true
-  prefetch_factor: 2
+  prefetch_factor: 16
   pin_memory: true
 
 # -------- Optimization (LeWM defaults) ---------------------------------------
