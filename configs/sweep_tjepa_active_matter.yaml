@@ -1,0 +1,74 @@
+# W&B sweep over TJEPA active-matter pretraining hyperparameters.
+#
+# Usage:
+#   wandb sweep configs/sweep_tjepa_active_matter.yaml
+#   # → prints "Created sweep with ID: <ENTITY>/<PROJECT>/<SWEEP_ID>"
+#   SWEEP_ID=<ENTITY>/<PROJECT>/<SWEEP_ID> sbatch sweep_agent.sbatch
+#
+# How this drives train.py:
+#   `${args_no_hyphens}` expands sweep-sampled params to "key=value key=value",
+#   which is exactly Hydra's CLI override syntax — no wrapper script needed.
+#   Lightning's WandbLogger auto-attaches to the agent-created run via the
+#   WANDB_RUN_ID env var that `wandb agent` sets before launching the program.
+
+program: train.py
+method: bayes
+name: tjepa-am-sweep
+entity: al6956-new-york-university
+project: tjepa-active-matter
+
+metric:
+  name: eval/knn_probe_acc
+  goal: maximize
+
+# Hyperband prunes underperforming trials early. min_iter=8 epochs gives the
+# online KNN probe enough warmup to produce a meaningful signal before pruning.
+early_terminate:
+  type: hyperband
+  min_iter: 8
+  eta: 3
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}
+  # Cap epochs for sweep trials so we get many comparable runs in 24h walltime.
+  - trainer.max_epochs=40
+  # Tag sweep runs and skip per-trial uploads to W&B (artifact storage adds up
+  # fast across ~30 trials). Local checkpointing still happens unconditionally
+  # via the ModelCheckpoint callbacks in train.py — log_model only gates the
+  # upload step, not the on-disk save.
+  - wandb.config.name=tjepa-am-sweep
+  - wandb.config.log_model=false
+  # Give every trial its own local checkpoint directory keyed on the W&B run
+  # ID so we can map a folder back to its sweep trial. `wandb agent` exports
+  # WANDB_RUN_ID before launching the program. Append a timestamp so the
+  # `nosweep` fallback (used when running plain `python train.py`) doesn't
+  # let concurrent non-sweep runs clobber each other's checkpoints.
+  - checkpoint.dirpath=checkpoints/tjepa-am-sweep/${oc.env:WANDB_RUN_ID,nosweep}/${now:%Y%m%d_%H%M%S}
+
+# Search space: levers that don't couple to the
+# `history_size + num_preds + (nsteps - 1) == num_frames` invariant
+# (asserted in physics_ssl/forward.py).
+parameters:
+  optimizer.lr:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 5.0e-4
+  optimizer.weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-2
+  loader.batch_size:
+    values: [32, 64, 128]
+  predictor.depth:
+    values: [4, 6, 8]
+  predictor.dropout:
+    distribution: uniform
+    min: 0.0
+    max: 0.3
+  loss.sigreg.weight:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.5
