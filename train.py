@@ -33,9 +33,15 @@ def run(cfg):
     pl.seed_everything(cfg.seed, workers=True)
 
     # ---------------- Data ----------------
-    transform = ChannelZScore(stats_path=cfg.data.stats_path) if Path(cfg.data.stats_path).exists() else None
+    transform = (
+        ChannelZScore(stats_path=cfg.data.stats_path)
+        if Path(cfg.data.stats_path).exists()
+        else None
+    )
     if transform is None:
-        print(f"[warn] stats file {cfg.data.stats_path} missing; running without channel z-score")
+        print(
+            f"[warn] stats file {cfg.data.stats_path} missing; running without channel z-score"
+        )
 
     train_set = ActiveMatterVideoDataset(
         root=cfg.data.root,
@@ -53,10 +59,16 @@ def run(cfg):
         param_stats=train_set.param_stats,
     )
     train_loader = torch.utils.data.DataLoader(
-        train_set, shuffle=True, drop_last=True, **cfg.loader,
+        train_set,
+        shuffle=True,
+        drop_last=True,
+        **cfg.loader,
     )
     val_loader = torch.utils.data.DataLoader(
-        val_set, shuffle=False, drop_last=False, **cfg.loader,
+        val_set,
+        shuffle=False,
+        drop_last=False,
+        **cfg.loader,
     )
     data_module = spt.data.DataModule(train=train_loader, val=val_loader)
 
@@ -117,35 +129,49 @@ def run(cfg):
 
     if cfg.probes.knn.enabled:
         from stable_pretraining.callbacks import OnlineKNN
-        callbacks.append(OnlineKNN(
-            module=module,
-            name="knn_probe",
-            input="embedding",
-            target="label",
-            queue_length=cfg.probes.knn.queue_length,
-            k=cfg.probes.knn.k,
-            metrics={"acc": torchmetrics.classification.MulticlassAccuracy(num_classes=n_classes)},
-        ))
+
+        callbacks.append(
+            OnlineKNN(
+                name="knn_probe",
+                input="embedding",
+                target="label",
+                queue_length=cfg.probes.knn.queue_length,
+                k=cfg.probes.knn.k,
+                metrics={
+                    "acc": torchmetrics.classification.MulticlassAccuracy(
+                        num_classes=n_classes
+                    )
+                },
+            )
+        )
     if cfg.probes.linear.enabled:
         from stable_pretraining.callbacks import OnlineProbe
-        callbacks.append(OnlineProbe(
-            module=module,
-            name="linear_probe",
-            input="embedding",
-            target="label",
-            probe=torch.nn.Linear(embed_dim, n_classes),
-            loss=torch.nn.CrossEntropyLoss(),
-            metrics={"acc": torchmetrics.classification.MulticlassAccuracy(num_classes=n_classes)},
-        ))
-    if cfg.probes.regression.enabled:
-        callbacks.append(RegressionProbe(
-            module=module,
-            name="regprobe",
-            input="embedding",
-            targets=tuple(cfg.probes.regression.targets),
-            in_features=embed_dim,
-        ))
 
+        callbacks.append(
+            OnlineProbe(
+                module=module,
+                name="linear_probe",
+                input="embedding",
+                target="label",
+                probe=torch.nn.Linear(embed_dim, n_classes),
+                loss=torch.nn.CrossEntropyLoss(),
+                metrics={
+                    "acc": torchmetrics.classification.MulticlassAccuracy(
+                        num_classes=n_classes
+                    )
+                },
+            )
+        )
+    if cfg.probes.regression.enabled:
+        callbacks.append(
+            RegressionProbe(
+                module=module,
+                name="regprobe",
+                input="embedding",
+                targets=tuple(cfg.probes.regression.targets),
+                in_features=embed_dim,
+            )
+        )
     # ---------------- Checkpointing ----------------
     # Validate that the best-track monitor metric will actually be produced by
     # an enabled probe; otherwise the best `ModelCheckpoint` silently writes
